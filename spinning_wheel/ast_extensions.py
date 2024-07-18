@@ -1,34 +1,53 @@
 import ast
-from _ast import Module
 
-from typing import Union, List
-
-from ordered_set import OrderedSet
+from typing import Union, List, Callable
 
 
 class ImportNodeFlattener(ast.NodeTransformer):
     """
     Node transformer implementation which flattens Import and ImportFrom nodes into multiple single line entries.
-    Duplicate flattened entries are not included.
+    """
+    _ImportTypes = Union[ast.Import, ast.ImportFrom]
+    _FlattenerFunction = Callable[[_ImportTypes], List[_ImportTypes]]
+    _DeduplicationFunction = Callable[[List[_ImportTypes]], List[_ImportTypes]]
+
+    def visit_Import(self, node: ast.Import) -> List[ast.Import]:
+        return list(map(lambda n: ast.Import([ast.alias(n.name, n.asname)]), node.names))
+
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> List[ast.ImportFrom]:
+        return list(map(lambda n: ast.ImportFrom(node.module, [ast.alias(n.name, n.asname)]), node.names))
+
+
+class ImportNodeDeduplicator(ast.NodeTransformer):
+    """
+    Node transformer implementation which deduplicates Import and ImportFrom statements
+    using alias as a basis.
     """
 
     def __init__(self):
-        self._observed_import_set = OrderedSet()
-        self._observed_import_from_set = OrderedSet()
+        self._observed_name_tuples = set()
 
-    def visit_Import(self, node: ast.Import) -> List[ast.Import]:
-        flattened_imports = list(map(lambda n: ast.Import([ast.alias(n.name, n.asname)]), node.names))
-        self._observed_import_set.update(flattened_imports)
-        return list(self._observed_import_set.difference(flattened_imports))
+    def visit_Import(self, node: ast.Import) -> Union[ast.Import, None]:
+        return self._remove_duplicate_aliases(node)
 
-    def visit_ImportFrom(self, node: ast.ImportFrom) -> List[ast.ImportFrom]:
-        flattened_from_imports = list(
-            map(lambda n: ast.ImportFrom(node.module,
-                                         [ast.alias(n.name, n.asname)],
-                                         node.level),
-                node.names))
-        self._observed_import_from_set.update(flattened_from_imports)
-        return list(self._observed_import_from_set.difference(flattened_from_imports))
+    def visit_ImportFrom(self, node: ast.ImportFrom) -> Union[ast.ImportFrom, None]:
+        return self._remove_duplicate_aliases(node)
+
+    def _remove_duplicate_aliases(self, node: Union[ast.Import, ast.ImportFrom]) \
+            -> Union[ast.Import, ast.ImportFrom, None]:
+        filtered_names = []
+
+        for name in node.names:
+            name_tuple = (name.name, name.asname)
+            if name_tuple not in self._observed_name_tuples:
+                filtered_names.append(name)
+                self._observed_name_tuples.add(name_tuple)
+
+        if filtered_names:
+            node.names = filtered_names
+            return node
+
+        return None
 
 
 class DuplicateClassAndFunctionRemover(ast.NodeTransformer):
@@ -36,15 +55,10 @@ class DuplicateClassAndFunctionRemover(ast.NodeTransformer):
     Node transformer implementation which removes duplicate class and function
     definitions on a first-come-first serve basis.
     """
-    ClassFunctionUnion = Union[ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef]
+    _ClassFunctionUnion = Union[ast.FunctionDef, ast.AsyncFunctionDef, ast.ClassDef]
 
     def __init__(self):
         self._observed_names = set()
-
-    def _node_or_none_if_exists(self, node: ClassFunctionUnion):
-        if node.name in self._observed_names:
-            return None
-        return node
 
     def visit_FunctionDef(self, node: ast.FunctionDef):
         return self._node_or_none_if_exists(node)
@@ -54,6 +68,12 @@ class DuplicateClassAndFunctionRemover(ast.NodeTransformer):
 
     def visit_ClassDef(self, node: ast.ClassDef):
         return self._node_or_none_if_exists(node)
+
+    def _node_or_none_if_exists(self, node: _ClassFunctionUnion):
+        if node.name in self._observed_names:
+            return None
+        self._observed_names.add(node.name)
+        return node
 
 
 class CompositeNodeTransformer(ast.NodeTransformer):
@@ -77,10 +97,11 @@ class CompositeNodeTransformer(ast.NodeTransformer):
             for collected_node in collected_nodes:
                 visitation_output = node_visitor.visit(collected_node)
 
-                if isinstance(visitation_output, list):
-                    visitation_outputs.extend(visitation_output)
-                else:
-                    visitation_outputs.append(visitation_output)
+                if visitation_output:
+                    if isinstance(visitation_output, list):
+                        visitation_outputs.extend(visitation_output)
+                    else:
+                        visitation_outputs.append(visitation_output)
 
             collected_nodes = visitation_outputs
 
@@ -101,16 +122,18 @@ def union_and_deconflict_modules(primary_module: ast.Module, reference_module: a
         ast.Module: Unioned module composed of the two input modules
     """
     # Create base unioned module with no modifications using the body of primary and reference modules
-    unioned_module: Module = ast.Module([], [])
+    unioned_module: ast.Module = ast.Module([], [])
     unioned_module.body.extend(primary_module.body)
     unioned_module.body.extend(reference_module.body)
 
     # Create composite node transformer which flattens and deduplicates imports,
     # and removes duplicate class and function definitions on a first come, first served basis,
     # using the identifer/name for deduplication
-    flattener_transformer = ImportNodeFlattener()
+    import_node_flattener = ImportNodeFlattener()
+    import_node_deduplicator = ImportNodeDeduplicator()
     duplicate_class_function_remover = DuplicateClassAndFunctionRemover()
-    composite_transformer = CompositeNodeTransformer([flattener_transformer, duplicate_class_function_remover])
+    transformers = [import_node_flattener, import_node_deduplicator, duplicate_class_function_remover]
+    composite_transformer = CompositeNodeTransformer(transformers)
     composite_transformer.visit(unioned_module)
 
     return unioned_module

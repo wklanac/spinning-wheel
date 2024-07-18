@@ -7,7 +7,6 @@ setup(
     packages=find_packages(exclude=["tests"]),
     install_requires=[
         "gitpython",
-        "ordered-set"
     ],
     extras_require={
         "test": ["pytest"]
