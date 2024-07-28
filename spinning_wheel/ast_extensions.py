@@ -1,6 +1,9 @@
 import ast
+from copy import deepcopy
 
-from typing import Union, List, Callable
+from typing import Union, List, Callable, TypeVar, Tuple
+
+_AST_SUBTYPE = TypeVar("AstSubtype", bound=ast.AST)
 
 
 class ImportNodeFlattener(ast.NodeTransformer):
@@ -50,7 +53,7 @@ class ImportNodeDeduplicator(ast.NodeTransformer):
         return None
 
 
-class DuplicateClassAndFunctionRemover(ast.NodeTransformer):
+class ClassAndFunctionDeduplicator(ast.NodeTransformer):
     """
     Node transformer implementation which removes duplicate class and function
     definitions on a first-come-first serve basis.
@@ -60,20 +63,48 @@ class DuplicateClassAndFunctionRemover(ast.NodeTransformer):
     def __init__(self):
         self._observed_names = set()
 
-    def visit_FunctionDef(self, node: ast.FunctionDef):
+    def visit_FunctionDef(self, node: ast.FunctionDef) -> Union[ast.FunctionDef, None]:
         return self._node_or_none_if_exists(node)
 
-    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef):
+    def visit_AsyncFunctionDef(self, node: ast.AsyncFunctionDef) -> Union[ast.AsyncFunctionDef, None]:
         return self._node_or_none_if_exists(node)
 
-    def visit_ClassDef(self, node: ast.ClassDef):
+    def visit_ClassDef(self, node: ast.ClassDef) -> Union[ast.ClassDef, None]:
         return self._node_or_none_if_exists(node)
 
-    def _node_or_none_if_exists(self, node: _ClassFunctionUnion):
+    def _node_or_none_if_exists(self, node: _ClassFunctionUnion) -> Union[_ClassFunctionUnion, None]:
         if node.name in self._observed_names:
             return None
         self._observed_names.add(node.name)
         return node
+
+
+class LineRangeRemover(ast.NodeTransformer):
+    """
+    Node transformer implementation which removes nodes based on
+    a range of lines to be excised, including nodes exactly at the boundaries of the range.
+
+    Nodes which cross the boundary of the range are removed in their entirety.
+    """
+
+    def __init__(self, removal_ranges: Tuple[Tuple[int, int]]):
+        self._removal_ranges = removal_ranges
+
+    def visit(self, node: ast.AST) -> Union[ast.AST, None]:
+        node_start = getattr(node, "lineno", None)
+        node_end = getattr(node, "end_lineno", None)
+
+        if node_start or node_end:
+            for removal_range in self._removal_ranges:
+                if any(
+                        map(
+                            lambda boundary: removal_range[0] <= boundary <= removal_range[1] if boundary else False,
+                            [node_start, node_end]
+                        )
+                ):
+                    return None
+
+        return self.generic_visit(node)
 
 
 class CompositeNodeTransformer(ast.NodeTransformer):
@@ -108,7 +139,10 @@ class CompositeNodeTransformer(ast.NodeTransformer):
         return collected_nodes if len(collected_nodes) > 1 else collected_nodes[0]
 
 
-def union_and_deconflict_modules(primary_module: ast.Module, reference_module: ast.Module) -> ast.Module:
+def union_and_deconflict_modules(
+        primary_module: ast.Module,
+        reference_module: ast.Module,
+        reference_ranges_to_remove: Tuple[Tuple[int, int]] = None) -> ast.Module:
     """
     Union two modules, treating one as primary and another as reference.
     Where name definitions overlap, the primary module takes priority
@@ -117,22 +151,33 @@ def union_and_deconflict_modules(primary_module: ast.Module, reference_module: a
     Args:
         primary_module (ast.Module): Primary module to merge
         reference_module (ast.Module): Reference module to merge
+        reference_ranges_to_remove: Line ranges (as tuples) to remove from reference before unioning
 
     Returns:
         ast.Module: Unioned module composed of the two input modules
     """
-    # Create base unioned module with no modifications using the body of primary and reference modules
+    # Create copies of both modules for mutation
+    cloned_primary = deepcopy(primary_module)
+    cloned_reference = deepcopy(reference_module)
+
+    # Pre-process reference tree and remove any desired line ranges
+    # Use sparingly when it is inconvenient to create significant additional functionality for deduplication
+    if reference_ranges_to_remove:
+        line_range_remover = LineRangeRemover(reference_ranges_to_remove)
+        line_range_remover.visit(cloned_reference)
+
+    # Create base unioned model after pre-processing
     unioned_module: ast.Module = ast.Module([], [])
-    unioned_module.body.extend(primary_module.body)
-    unioned_module.body.extend(reference_module.body)
+    unioned_module.body.extend(cloned_primary.body)
+    unioned_module.body.extend(cloned_reference.body)
 
     # Create composite node transformer which flattens and deduplicates imports,
     # and removes duplicate class and function definitions on a first come, first served basis,
     # using the identifer/name for deduplication
     import_node_flattener = ImportNodeFlattener()
     import_node_deduplicator = ImportNodeDeduplicator()
-    duplicate_class_function_remover = DuplicateClassAndFunctionRemover()
-    transformers = [import_node_flattener, import_node_deduplicator, duplicate_class_function_remover]
+    class_and_function_deduplicator = ClassAndFunctionDeduplicator()
+    transformers = [import_node_flattener, import_node_deduplicator, class_and_function_deduplicator]
     composite_transformer = CompositeNodeTransformer(transformers)
     composite_transformer.visit(unioned_module)
 

@@ -1,5 +1,4 @@
 # Spinning Wheel
-UNDER CONSTRUCTION
 ## Summary
 This project provides Python build-time automation for the parts of
 the AWS Lambda structure [prescribed by AWS](https://github.com/aws-samples/aws-secrets-manager-rotation-lambdas/blob/master/SecretsManagerRotationTemplate/lambda_function.py)

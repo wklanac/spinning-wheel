@@ -9,6 +9,6 @@ setup(
         "gitpython",
     ],
     extras_require={
-        "test": ["pytest"]
+        "test": ["assertpy", "pytest"]
     }
 )
